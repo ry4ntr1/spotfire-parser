@@ -27,6 +27,9 @@ def parse_field_value(fld, type_lookup):
             if val is not None:
                 return val
             if child.tag.endswith("Array"):
+                elems = child.find("sf:Elements", NS)
+                if elems is not None:
+                    return [parse_object(o, type_lookup) for o in elems.findall("sf:Object", NS)]
                 return [c.attrib.get("Value", (c.text or "").strip()) for c in child]
         else:
             values = []
@@ -100,6 +103,18 @@ def build_intermediate_model(xml_root):
         to.attrib.get("Id"): to.attrib.get("FullTypeName", "")
         for to in xml_root.findall(".//sf:TypeObject", NS)
     }
+    # Lookup tables for resolving ObjectRef references
+    string_lookup = {
+        s.attrib.get("Id"): s.attrib.get("Value", "")
+        for s in xml_root.findall(".//sf:String", NS)
+    }
+    data_type_lookup = {}
+    for o in xml_root.findall(".//sf:Object", NS):
+        ref = o.find("sf:Type/sf:TypeRef", NS)
+        if ref is not None and type_lookup.get(ref.attrib.get("Value"), "").endswith("DataType"):
+            name_f = o.find("sf:Fields/sf:Field[@Name='name']/sf:String", NS)
+            if name_f is not None:
+                data_type_lookup[o.attrib.get("Id")] = name_f.attrib.get("Value", "")
 
     for obj in xml_root.findall(".//sf:Object", NS):
         parsed = parse_object(obj, type_lookup)
@@ -122,12 +137,47 @@ def build_intermediate_model(xml_root):
                     **trans.get("Fields", {})
                 })
             # Collect Columns
-            for col in parsed["Fields"].get("Columns", []):
-                dt["Columns"].append({
-                    "Name": col["Fields"].get("Name", ""),
-                    "DataType": col["Fields"].get("DataType", ""),
-                    "Expression": col["Fields"].get("Expression", "")
-                })
+            cols_field = parsed["Fields"].get("Columns", [])
+            for col in cols_field:
+                # Older behavior: direct DataColumn objects
+                if col.get("Type") == "DataColumn":
+                    fields = col.get("Fields", {})
+                    name = fields.get("Name", "")
+                    if isinstance(name, str):
+                        name = string_lookup.get(name, name)
+                    dtype = fields.get("DataType", "")
+                    if isinstance(dtype, str):
+                        dtype = data_type_lookup.get(dtype, string_lookup.get(dtype, dtype))
+                    elif isinstance(dtype, dict):
+                        dtype = dtype.get("Fields", {}).get("name", "")
+                    elif isinstance(dtype, list) and dtype and isinstance(dtype[0], dict):
+                        dtype = dtype[0].get("Fields", {}).get("name", "")
+                    expr = fields.get("Expression", "")
+                    if isinstance(expr, str):
+                        expr = string_lookup.get(expr, expr)
+                    dt["Columns"].append({"Name": name, "DataType": dtype, "Expression": expr})
+                # Newer format: a DataColumnCollection with Items -> Nodes
+                elif col.get("Type") == "DataColumnCollection":
+                    for item in col.get("Fields", {}).get("Items", []):
+                        nodes = item.get("Fields", {}).get("Nodes", [])
+                        for node in nodes:
+                            if not isinstance(node, dict):
+                                continue
+                            fields = node.get("Fields", {})
+                            name = fields.get("Name", "")
+                            if isinstance(name, str):
+                                name = string_lookup.get(name, name)
+                            dtype = fields.get("DataType", "")
+                            if isinstance(dtype, str):
+                                dtype = data_type_lookup.get(dtype, string_lookup.get(dtype, dtype))
+                            elif isinstance(dtype, dict):
+                                dtype = dtype.get("Fields", {}).get("name", "")
+                            elif isinstance(dtype, list) and dtype and isinstance(dtype[0], dict):
+                                dtype = dtype[0].get("Fields", {}).get("name", "")
+                            expr = fields.get("Expression", "")
+                            if isinstance(expr, str):
+                                expr = string_lookup.get(expr, expr)
+                            dt["Columns"].append({"Name": name, "DataType": dtype, "Expression": expr})
             # Collect Relations
             for rel in parsed["Fields"].get("Relations", []):
                 dt["Relationships"].append({
