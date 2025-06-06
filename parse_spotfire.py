@@ -3,7 +3,7 @@ import os
 import zipfile
 import tempfile
 import json
-import xml.etree.ElementTree as ET
+from lxml import etree as ET
 
 # (1) Directories (inside container)
 INPUT_DIR = "dxp_input"
@@ -234,7 +234,11 @@ def process_dxp(dxp_path, output_dir):
             return
 
         # Parse XML
-        tree = ET.parse(xml_file)
+        try:
+            tree = ET.parse(xml_file)
+        except ET.XMLSyntaxError as e:
+            print(f"⚠️  Skipping {dxp_path}: XML syntax error: {e}")
+            return
         root = tree.getroot()
         im = build_intermediate_model(root)
 
