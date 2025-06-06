@@ -2,7 +2,6 @@
 import os
 import zipfile
 import tempfile
-import shutil
 import json
 import xml.etree.ElementTree as ET
 
@@ -13,7 +12,34 @@ OUTPUT_DIR = "im_output"
 # (2) Spotfire namespace (adjust if needed)
 NS = {"sf": "http://www.spotfire.com/schemas/Document1.0.xsd"}
 
-def parse_object(elem):
+def parse_field_value(fld, type_lookup):
+    """Return a Python representation of a <sf:Field> value."""
+    nested = fld.findall("sf:Object", NS)
+    if nested:
+        return [parse_object(n, type_lookup) for n in nested]
+
+    children = list(fld)
+    if children:
+        # <Field><String Value=".."/></Field> etc.
+        if len(children) == 1:
+            child = children[0]
+            val = child.attrib.get("Value")
+            if val is not None:
+                return val
+            if child.tag.endswith("Array"):
+                return [c.attrib.get("Value", (c.text or "").strip()) for c in child]
+        else:
+            values = []
+            for c in children:
+                v = c.attrib.get("Value")
+                if v is not None:
+                    values.append(v)
+            if values:
+                return values
+    return (fld.text or "").strip()
+
+
+def parse_object(elem, type_lookup):
     """
     Recursively parse a <sf:Object> node into a Python dict.
     
@@ -21,7 +47,18 @@ def parse_object(elem):
     """
     obj_id = elem.attrib.get("Id", "")
     type_node = elem.find("sf:Type", NS)
-    obj_type = type_node.text if type_node is not None else ""
+    obj_type = ""
+    if type_node is not None:
+        ref = type_node.find("sf:TypeRef", NS)
+        if ref is not None:
+            ref_id = ref.attrib.get("Value")
+            obj_type = type_lookup.get(ref_id, "")
+        else:
+            to = type_node.find("sf:TypeObject", NS)
+            if to is not None:
+                obj_type = to.attrib.get("FullTypeName", "")
+    if obj_type.startswith("Spotfire") and "." in obj_type:
+        obj_type = obj_type.split(".")[-1]
     
     fields_dict = {}
     # ─── Look inside <sf:Fields> for all <sf:Field> children ───
@@ -29,17 +66,11 @@ def parse_object(elem):
     if fields_container is not None:
         for fld in fields_container.findall("sf:Field", NS):
             name = fld.attrib.get("Name")
-            # If this <Field> contains nested <sf:Object> tags:
-            nested = fld.findall("sf:Object", NS)
-            if nested:
-                fields_dict[name] = [parse_object(n) for n in nested]
-            else:
-                # Simple text‐only field
-                fields_dict[name] = (fld.text or "").strip()
+            fields_dict[name] = parse_field_value(fld, type_lookup)
     # ────────────────────────────────────────────────────────────
     
     # Also capture any direct child <sf:Object> (not inside <sf:Fields>)
-    children = [parse_object(child) for child in elem.findall("sf:Object", NS)]
+    children = [parse_object(child, type_lookup) for child in elem.findall("sf:Object", NS)]
     
     return {
         "Id": obj_id,
@@ -65,12 +96,15 @@ def build_intermediate_model(xml_root):
         "Scripts": []
     }
 
-    for obj in xml_root.findall("sf:Object", NS):
-        parsed = parse_object(obj)
+    type_lookup = {to.attrib.get("Id"): to.attrib.get("FullTypeName", "")
+                   for to in xml_root.findall(".//sf:TypeObject", NS)}
+
+    for obj in xml_root.findall(".//sf:Object", NS):
+        parsed = parse_object(obj, type_lookup)
         t = parsed["Type"]
 
         # 1. DataTable
-        if t == "DataTable":
+        if t.endswith("DataTable"):
             dt = {
                 "Id": parsed["Id"],
                 "Name": parsed["Fields"].get("Name", ""),
@@ -101,7 +135,7 @@ def build_intermediate_model(xml_root):
             im["DataTables"].append(dt)
 
         # 2. Visualizations (common types)
-        elif t in ["BarChart", "LineChart", "Table", "ScatterChart", "PieChart"]:
+        elif any(t.endswith(v) for v in ["BarChart", "LineChart", "Table", "ScatterChart", "PieChart"]):
             viz = {
                 "Id": parsed["Id"],
                 "Type": t,
