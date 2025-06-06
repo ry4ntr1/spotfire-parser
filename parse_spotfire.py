@@ -21,7 +21,16 @@ def parse_object(elem):
     """
     obj_id = elem.attrib.get("Id", "")
     type_node = elem.find("sf:Type", NS)
-    obj_type = type_node.text if type_node is not None else ""
+    obj_type = ""
+    if type_node is not None:
+        if type_node.text and type_node.text.strip():
+            obj_type = type_node.text.strip()
+        else:
+            to = type_node.find("sf:TypeObject", NS)
+            if to is not None:
+                obj_type = to.attrib.get("FullTypeName", "")
+                if obj_type.startswith("Spotfire") and "." in obj_type:
+                    obj_type = obj_type.split(".")[-1]
     
     fields_dict = {}
     # ─── Look inside <sf:Fields> for all <sf:Field> children ───
@@ -65,12 +74,12 @@ def build_intermediate_model(xml_root):
         "Scripts": []
     }
 
-    for obj in xml_root.findall("sf:Object", NS):
+    for obj in xml_root.findall(".//sf:Object", NS):
         parsed = parse_object(obj)
         t = parsed["Type"]
 
         # 1. DataTable
-        if t == "DataTable":
+        if t.endswith("DataTable"):
             dt = {
                 "Id": parsed["Id"],
                 "Name": parsed["Fields"].get("Name", ""),
@@ -101,7 +110,7 @@ def build_intermediate_model(xml_root):
             im["DataTables"].append(dt)
 
         # 2. Visualizations (common types)
-        elif t in ["BarChart", "LineChart", "Table", "ScatterChart", "PieChart"]:
+        elif any(t.endswith(v) for v in ["BarChart", "LineChart", "Table", "ScatterChart", "PieChart"]):
             viz = {
                 "Id": parsed["Id"],
                 "Type": t,
