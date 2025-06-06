@@ -59,7 +59,7 @@ def parse_object(elem, type_lookup):
                 obj_type = to.attrib.get("FullTypeName", "")
     if obj_type.startswith("Spotfire") and "." in obj_type:
         obj_type = obj_type.split(".")[-1]
-    
+
     fields_dict = {}
     # ─── Look inside <sf:Fields> for all <sf:Field> children ───
     fields_container = elem.find("sf:Fields", NS)
@@ -68,10 +68,10 @@ def parse_object(elem, type_lookup):
             name = fld.attrib.get("Name")
             fields_dict[name] = parse_field_value(fld, type_lookup)
     # ────────────────────────────────────────────────────────────
-    
+
     # Also capture any direct child <sf:Object> (not inside <sf:Fields>)
     children = [parse_object(child, type_lookup) for child in elem.findall("sf:Object", NS)]
-    
+
     return {
         "Id": obj_id,
         "Type": obj_type,
@@ -96,8 +96,10 @@ def build_intermediate_model(xml_root):
         "Scripts": []
     }
 
-    type_lookup = {to.attrib.get("Id"): to.attrib.get("FullTypeName", "")
-                   for to in xml_root.findall(".//sf:TypeObject", NS)}
+    type_lookup = {
+        to.attrib.get("Id"): to.attrib.get("FullTypeName", "")
+        for to in xml_root.findall(".//sf:TypeObject", NS)
+    }
 
     for obj in xml_root.findall(".//sf:Object", NS):
         parsed = parse_object(obj, type_lookup)
@@ -202,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
