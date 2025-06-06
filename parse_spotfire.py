@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+import os
+import zipfile
+import tempfile
+import shutil
+import json
+import xml.etree.ElementTree as ET
+
+# (1) Directories (inside container)
+INPUT_DIR = "dxp_input"
+OUTPUT_DIR = "im_output"
+
+# (2) Spotfire namespace (adjust if needed)
+NS = {"sf": "http://www.spotfire.com/schemas/Document1.0.xsd"}
+
+def parse_object(elem):
+    """
+    Recursively parse a <sf:Object> node into a Python dict.
+    
+    Changed: first look under <sf:Fields> for <sf:Field> children.
+    """
+    obj_id = elem.attrib.get("Id", "")
+    type_node = elem.find("sf:Type", NS)
+    obj_type = type_node.text if type_node is not None else ""
+    
+    fields_dict = {}
+    # ─── Look inside <sf:Fields> for all <sf:Field> children ───
+    fields_container = elem.find("sf:Fields", NS)
+    if fields_container is not None:
+        for fld in fields_container.findall("sf:Field", NS):
+            name = fld.attrib.get("Name")
+            # If this <Field> contains nested <sf:Object> tags:
+            nested = fld.findall("sf:Object", NS)
+            if nested:
+                fields_dict[name] = [parse_object(n) for n in nested]
+            else:
+                # Simple text‐only field
+                fields_dict[name] = (fld.text or "").strip()
+    # ────────────────────────────────────────────────────────────
+    
+    # Also capture any direct child <sf:Object> (not inside <sf:Fields>)
+    children = [parse_object(child) for child in elem.findall("sf:Object", NS)]
+    
+    return {
+        "Id": obj_id,
+        "Type": obj_type,
+        "Fields": fields_dict,
+        "Children": children
+    }
+
+def build_intermediate_model(xml_root):
+    """
+    Walk the AnalysisDocument root and collect:
+    - DataTables
+    - Visualizations (BarChart, LineChart, etc.)
+    - Filters / FilteringSchemes
+    - Bookmarks
+    - Scripts / DataFunctions
+    """
+    im = {
+        "DataTables": [],
+        "Visualizations": [],
+        "Filters": [],
+        "Bookmarks": [],
+        "Scripts": []
+    }
+
+    for obj in xml_root.findall("sf:Object", NS):
+        parsed = parse_object(obj)
+        t = parsed["Type"]
+
+        # 1. DataTable
+        if t == "DataTable":
+            dt = {
+                "Id": parsed["Id"],
+                "Name": parsed["Fields"].get("Name", ""),
+                "DataSource": parsed["Fields"].get("DataSource", ""),
+                "Transformations": [],
+                "Columns": [],
+                "Relationships": []
+            }
+            # Collect Transformations (each one is itself an <Object>)
+            for trans in parsed["Fields"].get("Transformations", []):
+                dt["Transformations"].append({
+                    "Type": trans.get("Type", ""),
+                    **trans.get("Fields", {})
+                })
+            # Collect Columns
+            for col in parsed["Fields"].get("Columns", []):
+                dt["Columns"].append({
+                    "Name": col["Fields"].get("Name", ""),
+                    "DataType": col["Fields"].get("DataType", ""),
+                    "Expression": col["Fields"].get("Expression", "")
+                })
+            # Collect Relations
+            for rel in parsed["Fields"].get("Relations", []):
+                dt["Relationships"].append({
+                    "Type": rel.get("Type", ""),
+                    **rel.get("Fields", {})
+                })
+            im["DataTables"].append(dt)
+
+        # 2. Visualizations (common types)
+        elif t in ["BarChart", "LineChart", "Table", "ScatterChart", "PieChart"]:
+            viz = {
+                "Id": parsed["Id"],
+                "Type": t,
+                "DataTable": parsed["Fields"].get("Data", ""),
+                "Bindings": {},
+                "Filters": parsed["Fields"].get("Filters", ""),
+                "Formatting": parsed["Fields"].get("Format", "")
+            }
+            # Common binding fields (adjust as needed)
+            for bf in ["XAxisColumn", "YAxisColumn", "ColorBy", "CategoryField", "ValueField", "Legend"]:
+                if bf in parsed["Fields"]:
+                    viz["Bindings"][bf] = parsed["Fields"][bf]
+            im["Visualizations"].append(viz)
+
+        # 3. FilteringScheme or Filter
+        elif t in ["FilteringScheme", "Filter"]:
+            im["Filters"].append(parsed)
+
+        # 4. Bookmark
+        elif t == "Bookmark":
+            im["Bookmarks"].append(parsed)
+
+        # 5. Script / DataFunction
+        elif t in ["Script", "DataFunction"]:
+            im["Scripts"].append({
+                "Id": parsed["Id"],
+                "Type": t,
+                "Content": parsed["Fields"].get("Script", parsed["Fields"].get("Expression", ""))
+            })
+
+    return im
+
+def process_dxp(dxp_path, output_dir):
+    """Unzip .dxp, locate AnalysisDocument.xml, build IM, write JSON."""
+    base_name = os.path.splitext(os.path.basename(dxp_path))[0]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Unzip into tmpdir
+        with zipfile.ZipFile(dxp_path, "r") as z:
+            z.extractall(tmpdir)
+
+        xml_file = os.path.join(tmpdir, "AnalysisDocument.xml")
+        if not os.path.isfile(xml_file):
+            print(f"⚠️  Skipping {dxp_path}: AnalysisDocument.xml not found.")
+            return
+
+        # Parse XML
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        im = build_intermediate_model(root)
+
+        # Write JSON
+        out_path = os.path.join(output_dir, f"{base_name}_IM.json")
+        with open(out_path, "w", encoding="utf-8") as fp:
+            json.dump(im, fp, indent=2)
+        print(f"✅  Parsed {dxp_path} → {out_path}")
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    for fname in os.listdir(INPUT_DIR):
+        if fname.lower().endswith(".dxp"):
+            full = os.path.join(INPUT_DIR, fname)
+            process_dxp(full, OUTPUT_DIR)
+
+if __name__ == "__main__":
+    main()
+
